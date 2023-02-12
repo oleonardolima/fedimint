@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["QueryStep"],"struct":["CurrentConsensus","EventuallyConsistent","Retry404","TrustAllPeers","UnionResponses","UnionResponsesSingle","VerifiableResponse"],"trait":["QueryStrategy"]};

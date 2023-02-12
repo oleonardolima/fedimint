@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `fedimint-server/src/lib.rs`."><title>lib.rs - source</title><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/SourceSerif4-Regular-46f98efaafac5295.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/FiraSans-Regular-018c141bf0843ffd.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/FiraSans-Medium-8f9a781e4970d388.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/SourceCodePro-Regular-562dcc5011b6de7d.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/SourceSerif4-Bold-a2c9cd1067f8b328.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/SourceCodePro-Semibold-d899c5a5c4aeb14a.ttf.woff2"><link rel="stylesheet" href="../../static.files/normalize-76eba96aa4d2e634.css"><link rel="stylesheet" href="../../static.files/rustdoc-0ef3deca4ed45ad8.css" id="mainThemeStyle"><link rel="stylesheet" id="themeStyle" href="../../static.files/light-f501212b8b071243.css"><link rel="stylesheet" disabled href="../../static.files/dark-e92fc12c34ff89d3.css"><link rel="stylesheet" disabled href="../../static.files/ayu-a0090c8b1ced384f.css"><script id="default-settings" ></script><script src="../../static.files/storage-3891ce972e3a2bf8.js"></script><script defer src="../../static.files/source-script-ea63cb6500f71309.js"></script><script defer src="../../source-files.js"></script><script defer src="../../static.files/main-364b95f387bc3166.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-13285aec31fa243e.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-16x16-8b506e7a72182f1c.png"><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-422f7d1d52889060.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-2c020d218678b618.svg"></head><body class="rustdoc source"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"></nav><main><nav class="sub"><a class="sub-logo-container" href="../../fedimint_server/index.html"><img class="rust-logo" src="../../static.files/rust-logo-151179464ae7ed46.svg" alt="logo"></a><form class="search-form"><span></span><input class="search-input" name="search" aria-label="Run search in the documentation" autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"><div id="help-button" title="help" tabindex="-1"><a href="../../help.html">?</a></div><div id="settings-menu" tabindex="-1"><a href="../../settings.html" title="settings"><img width="22" height="22" alt="Change settings" src="../../static.files/wheel-5ec35bf9ca753509.svg"></a></div></form></nav><section id="main-content" class="content"><div class="example-wrap"><pre class="src-line-numbers"><a href="#1" id="1">1</a>
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `fedimint-server/src/lib.rs`."><title>lib.rs - source</title><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/SourceSerif4-Regular-46f98efaafac5295.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/FiraSans-Regular-018c141bf0843ffd.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/FiraSans-Medium-8f9a781e4970d388.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/SourceCodePro-Regular-562dcc5011b6de7d.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/SourceSerif4-Bold-a2c9cd1067f8b328.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/SourceCodePro-Semibold-d899c5a5c4aeb14a.ttf.woff2"><link rel="stylesheet" href="../../static.files/normalize-76eba96aa4d2e634.css"><link rel="stylesheet" href="../../static.files/rustdoc-0ef3deca4ed45ad8.css" id="mainThemeStyle"><link rel="stylesheet" id="themeStyle" href="../../static.files/light-f501212b8b071243.css"><link rel="stylesheet" disabled href="../../static.files/dark-e92fc12c34ff89d3.css"><link rel="stylesheet" disabled href="../../static.files/ayu-a0090c8b1ced384f.css"><script src="../../static.files/storage-3891ce972e3a2bf8.js"></script><script defer src="../../static.files/source-script-ea63cb6500f71309.js"></script><script defer src="../../source-files.js"></script><script defer src="../../static.files/main-bfa4087bf2db080e.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-13285aec31fa243e.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-16x16-8b506e7a72182f1c.png"><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-422f7d1d52889060.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-2c020d218678b618.svg"></head><body class="rustdoc source"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"></nav><main><nav class="sub"><a class="sub-logo-container" href="../../fedimint_server/index.html"><img class="rust-logo" src="../../static.files/rust-logo-151179464ae7ed46.svg" alt="logo"></a><form class="search-form"><span></span><input class="search-input" name="search" aria-label="Run search in the documentation" autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"><div id="help-button" title="help" tabindex="-1"><a href="../../help.html">?</a></div><div id="settings-menu" tabindex="-1"><a href="../../settings.html" title="settings"><img width="22" height="22" alt="Change settings" src="../../static.files/wheel-7b819b6101059cd0.svg"></a></div></form></nav><section id="main-content" class="content"><div class="example-wrap"><pre class="src-line-numbers"><a href="#1" id="1">1</a>
 <a href="#2" id="2">2</a>
 <a href="#3" id="3">3</a>
 <a href="#4" id="4">4</a>
@@ -550,6 +550,11 @@
 <a href="#550" id="550">550</a>
 <a href="#551" id="551">551</a>
 <a href="#552" id="552">552</a>
+<a href="#553" id="553">553</a>
+<a href="#554" id="554">554</a>
+<a href="#555" id="555">555</a>
+<a href="#556" id="556">556</a>
+<a href="#557" id="557">557</a>
 </pre><pre class="rust"><code><span class="kw">extern crate </span>fedimint_api;
 
 <span class="kw">use </span>std::cmp::min;
@@ -566,6 +571,8 @@
 <span class="kw">use </span>fedimint_api::net::peers::PeerConnections;
 <span class="kw">use </span>fedimint_api::task::{sleep, TaskGroup, TaskHandle};
 <span class="kw">use </span>fedimint_api::{NumPeers, PeerId};
+<span class="kw">use </span>fedimint_core::api::WsFederationApi;
+<span class="kw">use </span>fedimint_core::api::{DynFederationApi, GlobalFederationApi};
 <span class="kw">use </span>fedimint_core::epoch::{
     ConsensusItem, EpochVerifyError, SerdeConsensusItem, SignedEpochOutcome,
 };
@@ -577,8 +584,6 @@
 <span class="kw">use </span>hbbft::honey_badger::{Batch, HoneyBadger, Message, Step};
 <span class="kw">use </span>hbbft::{Epoched, NetworkInfo, Target};
 <span class="kw">use </span>itertools::Itertools;
-<span class="kw">use </span>mint_client::api::WsFederationApi;
-<span class="kw">use </span>mint_client::api::{DynFederationApi, GlobalFederationApi};
 <span class="kw">use </span>rand::rngs::OsRng;
 <span class="kw">use </span>rand::{CryptoRng, RngCore};
 <span class="kw">use </span>serde::{Deserialize, Serialize};
@@ -679,8 +684,8 @@
 
         <span class="kw">loop </span>{
             <span class="macro">info!</span>(<span class="string">&quot;Waiting for peers to agree on a consensus config hash&quot;</span>);
-            <span class="kw">match </span>server.api.download_client_config().<span class="kw">await </span>{
-                <span class="prelude-val">Ok</span>(response) <span class="kw">if </span>response.consensus_hash == consensus.consensus_hash =&gt; <span class="kw">break</span>,
+            <span class="kw">match </span>server.api.consensus_config_hash().<span class="kw">await </span>{
+                <span class="prelude-val">Ok</span>(consensus_hash) <span class="kw">if </span>consensus_hash == consensus.consensus_hash =&gt; <span class="kw">break</span>,
                 <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="macro">bail!</span>(<span class="string">&quot;Our consensus config doesn&#39;t match peers!&quot;</span>),
                 <span class="prelude-val">Err</span>(e) =&gt; {
                     <span class="macro">warn!</span>(target: LOG_CONSENSUS, <span class="string">&quot;ERROR {:?}&quot;</span>, e)
@@ -832,7 +837,8 @@
         <span class="comment">// once we produce an outcome we no longer need to rejoin
         </span><span class="self">self</span>.rejoin_at_epoch = <span class="prelude-val">None</span>;
 
-        <span class="kw">for </span>epoch_num <span class="kw">in </span><span class="self">self</span>.next_epoch_to_process()..=last_outcome.epoch {
+        <span class="kw">let </span>next_epoch_to_process = <span class="self">self</span>.next_epoch_to_process();
+        <span class="kw">for </span>epoch_num <span class="kw">in </span>next_epoch_to_process..=last_outcome.epoch {
             <span class="kw">let </span>(items, epoch, prev_epoch_hash, rejected_txs, at_know_trusted_checkpoint) =
                 <span class="kw">if </span>epoch_num == last_outcome.epoch {
                     (
@@ -909,7 +915,7 @@
               <span class="kw">_ </span>= Pin::new(<span class="kw-2">&amp;mut </span><span class="self">self</span>.tx_receiver).peek() =&gt; (),
               () = <span class="self">self</span>.consensus.await_consensus_proposal() =&gt; (),
             }
-            <span class="self">self</span>.save_new_txs().<span class="kw">await</span>;
+            <span class="self">self</span>.save_txs_to_consensus_cache();
             <span class="kw">let </span>proposal = proposal.<span class="kw">await</span>;
             <span class="kw">let </span>epoch = <span class="self">self</span>.hbbft.epoch();
             <span class="self">self</span>.hbbft.skip_to_epoch(epoch + <span class="number">1</span>);
@@ -929,7 +935,7 @@
                 <span class="kw">_ </span>=&gt; <span class="kw">break </span><span class="macro">vec!</span>[],
             };
         };
-        <span class="self">self</span>.save_new_txs().<span class="kw">await</span>;
+        <span class="self">self</span>.save_txs_to_consensus_cache();
 
         <span class="kw">let </span>proposal = proposal.<span class="kw">await</span>;
         <span class="kw">for </span>peer <span class="kw">in </span>proposal.drop_peers.iter() {
@@ -946,9 +952,10 @@
     }
 
     <span class="comment">// save any transactions we have in the channel
-    </span><span class="kw">async fn </span>save_new_txs(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+    </span><span class="kw">fn </span>save_txs_to_consensus_cache(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+        <span class="kw">let </span><span class="kw-2">mut </span>tx_cache = <span class="self">self</span>.consensus.tx_cache.lock().unwrap();
         <span class="kw">while let </span><span class="prelude-val">Some</span>(<span class="prelude-val">Some</span>(tx)) = <span class="self">self</span>.tx_receiver.next().now_or_never() {
-            <span class="self">self</span>.consensus.save_transaction_to_db(tx).<span class="kw">await</span>;
+            tx_cache.insert(tx);
         }
     }
 
@@ -1032,8 +1039,11 @@
                 <span class="prelude-val">Ok</span>(<span class="self">self</span>.handle_step(step).<span class="kw">await</span><span class="question-mark">?</span>)
             }
             (<span class="kw">_</span>, EpochMessage::RejoinRequest(epoch)) =&gt; {
-                <span class="macro">info!</span>(<span class="string">&quot;Requested to run {} epochs&quot;</span>, epoch);
-                <span class="self">self</span>.run_empty_epochs = min(NUM_EPOCHS_REJOIN_AHEAD, epoch);
+                <span class="self">self</span>.run_empty_epochs += min(NUM_EPOCHS_REJOIN_AHEAD, epoch);
+                <span class="macro">info!</span>(
+                    <span class="string">&quot;Requested to run {} epochs, running {} epochs&quot;</span>,
+                    epoch, <span class="self">self</span>.run_empty_epochs
+                );
                 <span class="prelude-val">Ok</span>(<span class="macro">vec!</span>[])
             }
         }
@@ -1103,4 +1113,4 @@
     (outcome, ban_peers)
 }
 </code></pre></div>
-</section></main><div id="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="fedimint_server" data-themes="" data-resource-suffix="" data-rustdoc-version="1.69.0-nightly (e1eaa2d5d 2023-02-06)" data-search-js="search-28136cea55c34037.js" data-settings-js="settings-f0c5c39777a9a2f6.js" data-settings-css="settings-0bcba95ff279c1db.css" ></div></body></html>
+</section></main><div id="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="fedimint_server" data-themes="" data-resource-suffix="" data-rustdoc-version="1.69.0-nightly (585f3eef2 2023-02-11)" data-search-js="search-28136cea55c34037.js" data-settings-js="settings-f0c5c39777a9a2f6.js" data-settings-css="settings-0bcba95ff279c1db.css" ></div></body></html>
