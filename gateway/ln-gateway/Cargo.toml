@@ -67,11 +67,13 @@ url = { version = "2.3.1", features = ["serde"] }
 
 [dev-dependencies]
 fedimint-dummy-client = { path = "../../modules/fedimint-dummy-client" }
-fedimint-dummy-server = { path = "../../modules/fedimint-dummy-server" }
 fedimint-dummy-common = { path = "../../modules/fedimint-dummy-common" }
+fedimint-dummy-server = { path = "../../modules/fedimint-dummy-server" }
 fedimint-ln-client = { path = "../../modules/fedimint-ln-client" }
-fedimint-ln-server = { path = "../../modules/fedimint-ln-server" }
 fedimint-ln-common = { path = "../../modules/fedimint-ln-common" }
+fedimint-ln-server = { path = "../../modules/fedimint-ln-server" }
+fedimint-mint-common = { path = "../../modules/fedimint-mint-common" }
+fedimint-mint-server = { path = "../../modules/fedimint-mint-server" }
 fedimint-testing = { path = "../../fedimint-testing" }
 portpicker = "0.1.1"
 threshold_crypto = { git = "https://github.com/fedimint/threshold_crypto" }

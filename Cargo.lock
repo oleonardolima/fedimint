@@ -3056,6 +3056,8 @@ dependencies = [
  "fedimint-ln-server",
  "fedimint-logging",
  "fedimint-mint-client",
+ "fedimint-mint-common",
+ "fedimint-mint-server",
  "fedimint-rocksdb",
  "fedimint-testing",
  "fedimint-wallet-client",

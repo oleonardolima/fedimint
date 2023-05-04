@@ -4,9 +4,10 @@
 //! and business logic.
 mod fixtures;
 
+use fedimint_core::config::FederationId;
 use fedimint_testing::federation::FederationTest;
 use ln_gateway::rpc::rpc_client::GatewayRpcClient;
-use ln_gateway::rpc::ConnectFedPayload;
+use ln_gateway::rpc::{ConnectFedPayload, GatewayInfo};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn gatewayd_supports_connecting_multiple_federations() {
@@ -56,6 +57,27 @@ async fn gatewayd_shows_info_about_all_connected_federations() {
         .federations
         .iter()
         .any(|info| info.federation_id == id2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gatewayd_shows_detailed_info_about_filtered_federation() {
+    let (_, rpc, fed1, fed2, _) = fixtures::fixtures(None).await;
+
+    let get_federation_id_from_info = |fed_info: GatewayInfo| -> FederationId {
+        fed_info.federations.first().unwrap().federation_id
+    };
+
+    let fed1_id = fed1.new_client().await.federation_id();
+    let fed1_info = rpc.get_info(Some(fed1_id)).await.unwrap();
+
+    assert_eq!(fed1_info.federations.len(), 1);
+    assert_eq!(get_federation_id_from_info(fed1_info), fed1_id);
+
+    let fed2_id = fed2.new_client().await.federation_id();
+    let fed2_info = rpc.get_info(Some(fed2_id)).await.unwrap();
+
+    assert_eq!(fed2_info.federations.len(), 1);
+    assert_eq!(get_federation_id_from_info(fed2_info), fed2_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
