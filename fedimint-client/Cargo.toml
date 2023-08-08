@@ -21,9 +21,9 @@ async-stream = "0.3.5"
 async-trait = "0.1.66"
 bitcoin = "0.29.2"
 bitcoin_hashes = "0.11.0"
+fedimint-aead = { path = "../crypto/aead" }
 fedimint-core  = { path = "../fedimint-core/" }
 fedimint-derive-secret = { path = "../crypto/derive-secret" }
-fedimint-aead = { path = "../crypto/aead" }
 fedimint-logging = { path = "../fedimint-logging" }
 futures = "0.3.26"
 itertools = "0.10.5"

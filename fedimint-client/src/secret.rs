@@ -28,14 +28,14 @@ impl DeriveableSecretClientExt for DerivableSecret {
 }
 
 /// Trait defining a way to generate, serialize and deserialize a root secret.
-/// It defines a `Encoding` associated type which represents a specific
+/// It defines an `Encoding` associated type which represents a specific
 /// representation of a secret (e.g. a bip39, slip39, CODEX32, … struct) and
 /// then defines the methods necessary for the client to interact with it.
 ///
 /// We use a strategy pattern (i.e. implementing the trait on a zero sized type
 /// with the actual secret struct as an associated type instead of implementing
 /// the necessary functions directly on the secret struct) to allow external
-/// implementations on third-party types without wrapping them in newtypes.
+/// implementations on third-party types without wrapping them in new types.
 pub trait RootSecretStrategy: Debug {
     /// Type representing the secret
     type Encoding: Clone;

@@ -745,7 +745,7 @@ where
         }
     }
 
-    /// Attempt to re-decode raw values with new set of of `modules`
+    /// Attempt to re-decode raw values with new set of `modules`
     ///
     /// In certain contexts it might be necessary to try again with
     /// a new set of modules.

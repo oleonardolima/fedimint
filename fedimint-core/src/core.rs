@@ -37,7 +37,7 @@ pub mod backup;
 /// each instance will have a different id.
 ///
 /// Note: We have used this type differently before, assuming each `u16`
-/// uniquly identifies a type of module in question. This function will move
+/// uniquely identifies a type of module in question. This function will move
 /// to a `ModuleKind` type which only identifies type of a module (mint vs
 /// wallet vs ln, etc)
 // TODO: turn in a newtype

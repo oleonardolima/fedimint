@@ -167,6 +167,7 @@ where
             }
         })
     }
+
     fn map_err_cli_general(self) -> Result<O, CliError> {
         self.map_err(|e| {
             let e = e.into();
