@@ -63,6 +63,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{Mutex, OnceCell, RwLock};
+use tokio_rustls::TlsConnector;
 use tracing::{debug, error, instrument, trace, warn};
 use url::Url;
 
@@ -1132,65 +1133,31 @@ where
     }
 }
 
-/// Mint API client that will try to run queries against all `peers` expecting
-/// equal results from at least `min_eq_results` of them. Peers that return
-/// differing results are returned as a peer faults list.
+/// Federation API client that will try to run queries against all
+/// [`FederationPeer`]'s expecting equal results from at least `min_eq_results`
+/// of them. Peers that return differing results are returned as a peer faults
+/// list.
 #[derive(Debug, Clone)]
 pub struct WsFederationApi<C = WsClient> {
-    peer_ids: BTreeSet<PeerId>,
-    self_peer_id: Option<PeerId>,
+    // TODO: (@leonardo) I think the PeerId should move to `fedimint::core` instead.
+    peer_ids: BTreeSet<fedimint_core::PeerId>,
     peers: Arc<Vec<FederationPeer<C>>>,
-    module_id: Option<ModuleInstanceId>,
+    // TODO: (@leonardo) I think the PeerId should move to `fedimint::core` instead.
+    self_peer_id: Option<fedimint_core::PeerId>,
+    module_id: Option<fedimint_core::core::ModuleInstanceId>,
 }
 
-/// Some data shared/preserved between [`FederationPeerClient`] and
-/// Jit tasks it spawns.
+/// Federation API client that can connect and run queries against a single peer
+/// client ([`FederationPeerClient`]).
 #[derive(Debug)]
-struct FederationPeerClientShared {
-    last_connection_attempt: SystemTime,
-    connection_attempts: u64,
-}
-
-impl FederationPeerClientShared {
-    pub fn new() -> Self {
-        Self {
-            last_connection_attempt: now(),
-            connection_attempts: 0,
-        }
-    }
-
-    /// Wait (if needed) before reconnection attempt based on number of previous
-    /// attempts
-    async fn wait(&mut self) {
-        let desired_timeout = Duration::from_millis((self.connection_attempts * 100).min(5000));
-        let since_last_connect = now()
-            .duration_since(self.last_connection_attempt)
-            .unwrap_or_default();
-
-        let sleep_duration = desired_timeout.saturating_sub(since_last_connect);
-        if Duration::ZERO < sleep_duration {
-            debug!(
-                target: LOG_CLIENT_NET_API,
-                duration_ms=sleep_duration.as_millis(),
-                "Waiting before reconnecting");
-        }
-        fedimint_core::runtime::sleep(sleep_duration).await;
-    }
-
-    /// Wait (if needed) + update reconnection stats
-    async fn wait_and_inc_reconnect(&mut self) {
-        self.wait().await;
-        self.connection_attempts += 1;
-        self.last_connection_attempt = now()
-    }
-
-    async fn reset(&mut self) {
-        self.connection_attempts = 0;
-    }
+struct FederationPeer<C> {
+    url: SafeUrl,
+    peer_id: PeerId,
+    client: RwLock<FederationPeerClient<C>>,
 }
 
 /// The client in [`FederationPeer`], that takes care of reconnecting by
-/// starting background Jit task
+/// starting background Jit task.
 #[derive(Debug)]
 struct FederationPeerClient<C> {
     client: JitTryAnyhow<C>,
@@ -1253,15 +1220,65 @@ where
     }
 }
 
+/// Some data shared/preserved between [`FederationPeerClient`] and
+/// Jit tasks it spawns.
 #[derive(Debug)]
-struct FederationPeer<C> {
-    url: SafeUrl,
-    peer_id: PeerId,
-    client: RwLock<FederationPeerClient<C>>,
+struct FederationPeerClientShared {
+    last_connection_attempt: SystemTime,
+    connection_attempts: u64,
 }
+
+impl FederationPeerClientShared {
+    pub fn new() -> Self {
+        Self {
+            last_connection_attempt: now(),
+            connection_attempts: 0,
+        }
+    }
+
+    /// Wait (if needed) before reconnection attempt based on number of previous
+    /// attempts
+    async fn wait(&mut self) {
+        let desired_timeout = Duration::from_millis((self.connection_attempts * 100).min(5000));
+        let since_last_connect = now()
+            .duration_since(self.last_connection_attempt)
+            .unwrap_or_default();
+
+        let sleep_duration = desired_timeout.saturating_sub(since_last_connect);
+        if Duration::ZERO < sleep_duration {
+            debug!(
+                target: LOG_CLIENT_NET_API,
+                duration_ms=sleep_duration.as_millis(),
+                "Waiting before reconnecting");
+        }
+        fedimint_core::runtime::sleep(sleep_duration).await;
+    }
+
+    /// Wait (if needed) + update reconnection stats
+    async fn wait_and_inc_reconnect(&mut self) {
+        self.wait().await;
+        self.connection_attempts += 1;
+        self.last_connection_attempt = now()
+    }
+
+    async fn reset(&mut self) {
+        self.connection_attempts = 0;
+    }
+}
+
+// TODO: (@leonardo) maybe rename this to `WsClientConnector` or `WsConnector`?
+pub enum Connector {
+    Default,
+    Arti,
+}
+
+// TODO: (@leonardo) are these needed for using different traits ?
+pub struct TorWsClient(WsClient);
+pub struct ClearNetWsClient(WsClient);
+
 impl<C: JsonRpcClient + Debug + 'static> IModuleFederationApi for WsFederationApi<C> {}
 
-/// Implementation of API calls over websockets
+/// Implementation of API calls over WebSockets
 ///
 /// Can function as either the global or module API
 #[apply(async_trait_maybe_send!)]
@@ -1306,249 +1323,259 @@ impl<C: JsonRpcClient + Debug + 'static> IRawFederationApi for WsFederationApi<C
 
 #[apply(async_trait_maybe_send!)]
 pub trait JsonRpcClient: ClientT + Sized + MaybeSend + MaybeSync {
-    async fn connect(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError>;
-    async fn connect_anonymized(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError>;
     fn is_connected(&self) -> bool;
+    async fn connect(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError>;
 }
 
 #[apply(async_trait_maybe_send!)]
 impl JsonRpcClient for WsClient {
-    async fn connect(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError> {
-        // #[cfg(not(target_family = "wasm"))]
-        // return WsClientBuilder::default()
-        //     .use_webpki_rustls()
-        //     .max_concurrent_requests(u16::MAX as usize)
-        //     .build(url.as_str())
-        //     .await;
-
-        // #[cfg(target_family = "wasm")]
-        // WsClientBuilder::default()
-        //     .max_concurrent_requests(u16::MAX as usize)
-        //     .build(url.as_str())
-        //     .await
-
-        // NOTE: currently short-circuito to use Tor
-        Self::connect_anonymized(url).await
-    }
-
-    async fn connect_anonymized(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError> {
-        // TODO: (@leonardo) should extract this to an external function
-        let tor_config = TorClientConfig::default(); // TODO: (@leonardo) should we use the default one ?
-        let tor_client = TorClient::create_bootstrapped(tor_config).await.unwrap(); // TODO: (@leonardo) how to handle the arti_client::Error
-
-        // TODO: (@leonardo) should we parse to jsonrpsee's Target ?
-        // TODO: (@leonardo) how to handle the arti_client::Error ?
-        println!(
-            "url: {:?} ; host {:?}; port {:?} ; default {:?}",
-            url,
-            url.host_str(),
-            url.port(),
-            url.port_or_known_default()
-        );
-
-        // println!("SafeUrl: {:?} ; as_str: {} ", url, url.as_str());
-        // println!("host: {:?} ; port: {} ", url.host(), url.port().unwrap());
-
-        // TODO: (@leonardo) do we have any other way to the Url instead of using the
-        // `.to_unsafe()` ?
-        let mut unsafe_url = url.clone().to_unsafe();
-        println!("unsafe: {:?}", unsafe_url);
-
-        // let tor_addr = TorAddr::from(unsafe_url.as_str())
-        //     .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
-
-        let tor_addr = TorAddr::from((
-            unsafe_url.host_str().unwrap(),
-            // unsafe_url.port_or_known_default().unwrap(),
-            80,
-        ))
-        .unwrap();
-
-        println!("tor_addr {}", tor_addr);
-
-        println!(
-            "tor_addr.is_onion_address() {}",
-            tor_addr.is_onion_address()
-        );
-
-        match tor_addr.is_onion_address() {
-            true => {
-                println!("tor_addr.is_onion_address {}", true);
-                let mut stream_prefs = StreamPrefs::default();
-                stream_prefs.connect_to_onion_services(BoolOrAuto::Explicit(true));
-
-                let anonymized_stream = tor_client
-                    .connect_with_prefs(tor_addr, &stream_prefs)
-                    .await
-                    .unwrap();
-
-                // // TODO: (@leonardo) should extract to an external function
-                // let mut connector = match target._mode {
-                //     Mode::Tls => {
-                //         #[cfg(not(target_family = "wasm"))]
-                //         let certificate_store = CertificateStore::WebPki;
-
-                //         #[cfg(target_family = "wasm")]
-                //         let certificate_store = CertificateStore::Native;
-
-                //         let connector = build_tls_config(&certificate_store)
-                //             .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
-
-                //         Some(connector)
-                //     }
-                //     Mode::Plain => None,
-                // };
-
-                // match connector {
-                //     Some(connector) => {
-                //         let host = target.host.as_str();
-                //         let server_name: rustls_pki_types::ServerName = host
-                //             .try_into()
-                //             .map_err(|err1| {
-                //                 WsHandshakeError::Url(
-                //                     format!("Invalid host: {host} {err1:?}").into(),
-                //                 )
-                //             })
-                //             .map_err(|err2| JsonRpcClientError::Transport(err2.into()))?;
-                //         let anonymized_tls_stream = connector
-                //             .connect(server_name.to_owned(), anonymized_stream)
-                //             .await
-                //             .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
-
-                //         #[cfg(not(target_family = "wasm"))]
-                //         return WsClientBuilder::default()
-                //             .use_webpki_rustls()
-                //             .max_concurrent_requests(u16::MAX as usize)
-                //             .build_with_stream(url.as_str(), anonymized_tls_stream)
-                //             .await;
-
-                //         #[cfg(target_family = "wasm")]
-                //         return WsClientBuilder::default()
-                //             .max_concurrent_requests(u16::MAX as usize)
-                //             .build_with_stream(url.as_str(), anonymized_tls_stream)
-                //             .await;
-                //     }
-                //     None => {
-                //         let ws_client_builder = WsClientBuilder::default();
-                //         #[cfg(not(target_family = "wasm"))]
-                //         return WsClientBuilder::default()
-                //             .use_webpki_rustls()
-                //             .max_concurrent_requests(u16::MAX as usize)
-                //             .build_with_stream(url.as_str(), anonymized_stream)
-                //             .await;
-
-                //         #[cfg(target_family = "wasm")]
-                //         return WsClientBuilder::default()
-                //             .max_concurrent_requests(u16::MAX as usize)
-                //             .build_with_stream(url.as_str(), anonymized_stream)
-                //             .await;
-                //     }
-                // };
-
-                let ws_client_builder = WsClientBuilder::default();
-                #[cfg(not(target_family = "wasm"))]
-                return WsClientBuilder::default()
-                    .use_webpki_rustls()
-                    .max_concurrent_requests(u16::MAX as usize)
-                    .build_with_stream(url.as_str(), anonymized_stream)
-                    .await;
-
-                #[cfg(target_family = "wasm")]
-                return WsClientBuilder::default()
-                    .max_concurrent_requests(u16::MAX as usize)
-                    .build_with_stream(url.as_str(), anonymized_stream)
-                    .await;
-            }
-            false => {
-                let mut target: Target = unsafe_url
-                    .try_into()
-                    .map_err(|e: WsHandshakeError| JsonRpcClientError::Transport(e.into()))?;
-                println!("target: {:?}", target);
-
-                for sockaddr in target.sockaddrs {
-                    // let anonymized_stream = tor_client.connect(url.as_str()).await.unwrap();
-                    // TODO: (@leonardo) Should we use the IP and port or check the IntoTorAddr ?
-                    let anonymized_stream = tor_client
-                        .connect((sockaddr.ip().to_string(), sockaddr.port()))
-                        .await
-                        .unwrap();
-
-                    // TODO: (@leonardo) should extract to an external function
-                    let mut connector = match target._mode {
-                        Mode::Tls => {
-                            #[cfg(not(target_family = "wasm"))]
-                            let certificate_store = CertificateStore::WebPki;
-
-                            #[cfg(target_family = "wasm")]
-                            let certificate_store = CertificateStore::Native;
-
-                            let connector = build_tls_config(&certificate_store)
-                                .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
-
-                            Some(connector)
-                        }
-                        Mode::Plain => None,
-                    };
-
-                    match connector {
-                        Some(connector) => {
-                            let host = target.host.as_str();
-                            let server_name: rustls_pki_types::ServerName = host
-                                .try_into()
-                                .map_err(|err1| {
-                                    WsHandshakeError::Url(
-                                        format!("Invalid host: {host} {err1:?}").into(),
-                                    )
-                                })
-                                .map_err(|err2| JsonRpcClientError::Transport(err2.into()))?;
-                            let anonymized_tls_stream = connector
-                                .connect(server_name.to_owned(), anonymized_stream)
-                                .await
-                                .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
-
-                            #[cfg(not(target_family = "wasm"))]
-                            return WsClientBuilder::default()
-                                .use_webpki_rustls()
-                                .max_concurrent_requests(u16::MAX as usize)
-                                .build_with_stream(url.as_str(), anonymized_tls_stream)
-                                .await;
-
-                            #[cfg(target_family = "wasm")]
-                            return WsClientBuilder::default()
-                                .max_concurrent_requests(u16::MAX as usize)
-                                .build_with_stream(url.as_str(), anonymized_tls_stream)
-                                .await;
-                        }
-                        None => {
-                            let ws_client_builder = WsClientBuilder::default();
-                            #[cfg(not(target_family = "wasm"))]
-                            return WsClientBuilder::default()
-                                .use_webpki_rustls()
-                                .max_concurrent_requests(u16::MAX as usize)
-                                .build_with_stream(url.as_str(), anonymized_stream)
-                                .await;
-
-                            #[cfg(target_family = "wasm")]
-                            return WsClientBuilder::default()
-                                .max_concurrent_requests(u16::MAX as usize)
-                                .build_with_stream(url.as_str(), anonymized_stream)
-                                .await;
-                        }
-                    };
-                }
-
-                Err(JsonRpcClientError::Transport(
-                    WsHandshakeError::NoAddressFound(target.host).into(),
-                ))
-            }
-        }
-    }
-
     fn is_connected(&self) -> bool {
         self.is_connected()
     }
+
+    async fn connect(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError> {
+        #[cfg(not(target_family = "wasm"))]
+        return WsClientBuilder::default()
+            .use_webpki_rustls()
+            .max_concurrent_requests(u16::MAX as usize)
+            .build(url.as_str())
+            .await;
+
+        #[cfg(target_family = "wasm")]
+        WsClientBuilder::default()
+            .max_concurrent_requests(u16::MAX as usize)
+            .build(url.as_str())
+            .await
+    }
 }
 
+#[apply(async_trait_maybe_send!)]
+pub trait AnonymizedJsonRpcClient: ClientT + Sized + MaybeSend + MaybeSync {
+    fn is_connected(&self) -> bool;
+    async fn connect(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError>;
+    async fn connect_to_hostname(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError>;
+    async fn connect_to_onion_address(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError>;
+}
+
+#[apply(async_trait_maybe_send!)]
+impl AnonymizedJsonRpcClient for WsClient {
+    fn is_connected(&self) -> bool {
+        self.is_connected()
+    }
+
+    async fn connect(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError> {
+        // TODO: (@leonardo) should extract this to an external function
+        // let tor_config = TorClientConfig::default(); // TODO: (@leonardo) should we
+        // use the default one ? let tor_client =
+        // TorClient::create_bootstrapped(tor_config).await.unwrap(); // TODO:
+        // (@leonardo) how to handle the arti_client::Error
+
+        // TODO: (@leonardo) how to handle the arti_client::Error ?
+        // let tor_addr = TorAddr::from(unsafe_url.as_str())
+        //     .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
+
+        // TODO: (@leonardo) remove the unwraps
+        // let tor_addr = TorAddr::from((
+        //     unsafe_url.host_str().unwrap(),
+        //     unsafe_url.port_or_known_default().unwrap(),
+        // ))
+        // .unwrap();
+
+        // TODO: (@leonardo) should we implement our `IntoTorAddr` for `SafeUrl` instead
+        // ?
+        let addr = (
+            url.host_str()
+                .expect("It should've asserted for `host` on construction"),
+            url.port_or_known_default()
+                .expect("It should've asserted for `port`, or used a default one, on construction"),
+        );
+        let tor_addr = TorAddr::from(addr).map_err(|e| JsonRpcClientError::Transport(e.into()))?;
+
+        match tor_addr.is_onion_address() {
+            true => Self::connect_to_onion_address(url).await,
+            false => Self::connect_to_hostname(url).await,
+        }
+    }
+
+    // TODO: (@leonardo) should this be renamed to a more generic one, such as:
+    // `connect_to_ip_or_hostname` ?
+    async fn connect_to_hostname(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError> {
+        let tor_config = TorClientConfig::default(); // TODO: (@leonardo) should we use the default one ?
+        let tor_config_clone = tor_config.clone(); // FIXME: this should be removed, used only for debugging purposes
+        let tor_client = TorClient::create_bootstrapped(tor_config)
+            .await
+            .map_err(|e| JsonRpcClientError::Transport(e.into()))?; // TODO: (@leonardo) how to handle the arti_client::Error
+
+        // debug!(?tor_client, ?tor_config, "Created and bootstrapped the TorClient, for
+        // given TorConfig");
+        debug!(
+            ?tor_config_clone,
+            "Created and bootstrapped the TorClient, for given TorConfig"
+        );
+
+        let target = Target::try_from(url.clone())
+            .map_err(|e: WsHandshakeError| JsonRpcClientError::Transport(e.into()))?;
+
+        debug!(?target, ?url, "Resulting Target from given SafeUrl");
+
+        // TODO: (@leonardo) should we implement our `IntoTorAddr` for `SafeUrl` instead
+        // ?
+        let addr = (
+            url.host_str()
+                .expect("It should've asserted for `host` on construction"),
+            url.port_or_known_default()
+                .expect("It should've asserted for `port`, or used a default one, on construction"),
+        );
+        let tor_addr = TorAddr::from(addr).map_err(|e| JsonRpcClientError::Transport(e.into()))?;
+
+        // TODO: (@leonardo) Should we iterate through the sockaddrs, instead of using
+        // only the hostname ? It will probably leak the IP address during
+        // lookup, when using the sockaddrs, should we avoid it at all costs ?
+        for _sockaddr in &target.sockaddrs {
+            // TODO: (@leonardo) how to handle the arti_client::Error
+            let anonymized_stream = tor_client
+                .connect(tor_addr)
+                .await
+                .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
+
+            // TODO: (@leonardo) should extract to an external function
+            let tls_connector = target
+                .tls_connector()
+                .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
+
+            #[cfg(not(target_family = "wasm"))]
+            let ws_client_builder = WsClientBuilder::default()
+                .use_webpki_rustls()
+                .max_concurrent_requests(u16::MAX as usize);
+
+            #[cfg(target_family = "wasm")]
+            let ws_client_builder =
+                WsClientBuilder::default().max_concurrent_requests(u16::MAX as usize);
+
+            match tls_connector {
+                Some(tls_connector) => {
+                    let host = target.host.as_str();
+                    let server_name: rustls_pki_types::ServerName = host
+                        .try_into()
+                        .map_err(|err1| {
+                            WsHandshakeError::Url(format!("Invalid host: {host} {err1:?}").into())
+                        })
+                        .map_err(|err2| JsonRpcClientError::Transport(err2.into()))?;
+                    let anonymized_tls_stream = tls_connector
+                        .connect(server_name.to_owned(), anonymized_stream)
+                        .await
+                        .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
+
+                    return ws_client_builder
+                        .build_with_stream(url.as_str(), anonymized_tls_stream)
+                        .await;
+                }
+                None => {
+                    return ws_client_builder
+                        .build_with_stream(url.as_str(), anonymized_stream)
+                        .await;
+                }
+            };
+        }
+
+        Err(JsonRpcClientError::Transport(
+            WsHandshakeError::NoAddressFound(target.host).into(),
+        ))
+    }
+
+    async fn connect_to_onion_address(url: &SafeUrl) -> result::Result<Self, JsonRpcClientError> {
+        let tor_config = TorClientConfig::default(); // TODO: (@leonardo) should we use the default one ?
+        let tor_config_clone = tor_config.clone(); // FIXME: this should be removed, used only for debugging purposes
+        let tor_client = TorClient::create_bootstrapped(tor_config)
+            .await
+            .map_err(|e| JsonRpcClientError::Transport(e.into()))?; // TODO: (@leonardo) how to handle the arti_client::Error
+
+        // debug!(?tor_client, ?tor_config, "Created and bootstrapped the TorClient, for
+        // given TorConfig");
+        debug!(
+            ?tor_config_clone,
+            "Created and bootstrapped the TorClient, for given TorConfig"
+        );
+
+        // let target = Target::try_from(url.clone())
+        //     .map_err(|e: WsHandshakeError| JsonRpcClientError::Transport(e.into()))?;
+        // debug!(?target, ?url, "Resulting Target from given SafeUrl");
+
+        // TODO: (@leonardo) should we implement our `IntoTorAddr` for `SafeUrl` instead
+        // ?
+        let addr = (
+            url.host_str()
+                .expect("It should've asserted for `host` on construction"),
+            url.port_or_known_default()
+                .expect("It should've asserted for `port`, or used a default one, on construction"),
+        );
+        let tor_addr = TorAddr::from(addr).map_err(|e| JsonRpcClientError::Transport(e.into()))?;
+
+        // TODO: (@leonardo) Should we iterate through the sockaddrs, instead of using
+        // only the hostname ? It will probably leak the IP address during
+        // lookup, when using the sockaddrs, should we avoid it at all costs ?
+        // for _sockaddr in &target.sockaddrs {
+        // }
+
+        let mut stream_prefs = StreamPrefs::default();
+        stream_prefs.connect_to_onion_services(BoolOrAuto::Explicit(true));
+
+        // TODO: (@leonardo) how to handle the arti_client::Error
+        let anonymized_stream = tor_client
+            .connect_with_prefs(tor_addr, &stream_prefs)
+            .await
+            .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
+
+        // TODO: (@leonardo) should extract to an external function
+        // let tls_connector = target
+        //     .tls_connector()
+        //     .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
+
+        #[cfg(not(target_family = "wasm"))]
+        let ws_client_builder = WsClientBuilder::default()
+            .use_webpki_rustls()
+            .max_concurrent_requests(u16::MAX as usize);
+
+        #[cfg(target_family = "wasm")]
+        let ws_client_builder =
+            WsClientBuilder::default().max_concurrent_requests(u16::MAX as usize);
+
+        return ws_client_builder
+            .build_with_stream(url.as_str(), anonymized_stream)
+            .await;
+
+        // match tls_connector {
+        //     Some(tls_connector) => {
+        //         let host = target.host.as_str();
+        //         let server_name: rustls_pki_types::ServerName = host
+        //             .try_into()
+        //             .map_err(|err1| {
+        //                 WsHandshakeError::Url(format!("Invalid host: {host}
+        // {err1:?}").into())             })
+        //             .map_err(|err2|
+        // JsonRpcClientError::Transport(err2.into()))?;
+
+        //         let anonymized_tls_stream = tls_connector
+        //             .connect(server_name.to_owned(), anonymized_stream)
+        //             .await
+        //             .map_err(|e| JsonRpcClientError::Transport(e.into()))?;
+
+        //         return ws_client_builder
+        //             .build_with_stream(url.as_str(), anonymized_tls_stream)
+        //             .await;
+        //     }
+        //     None => {
+        //         return ws_client_builder
+        //             .build_with_stream(url.as_str(), anonymized_stream)
+        //             .await;
+        //     }
+        // };
+
+        // Err(JsonRpcClientError::Transport(
+        //     WsHandshakeError::NoAddressFound(target.host).into(),
+        // ))
+    }
+}
 /// Represents a verified remote WebSocket address.
 #[derive(Debug, Clone)]
 pub struct Target {
@@ -1558,11 +1585,77 @@ pub struct Target {
     host: String,
     /// The Host request header specifies the host and port number of the server
     /// to which the request is being sent.
-    host_header: String,
+    _host_header: String, // FIXME: should we remove this field ? (its not being used)
     /// WebSocket stream mode, see [`Mode`] for further documentation.
-    _mode: Mode,
+    mode: Mode,
     /// The path and query parts from an URL.
-    path_and_query: String,
+    _path_and_query: String, // FIXME: should we remove this field ? (its not being used)
+}
+
+impl Target {
+    // TODO: (@leonardo) this should not be dependant on `WsHandshakeError`
+    fn tls_connector(&self) -> Result<Option<TlsConnector>, WsHandshakeError> {
+        match self.mode {
+            Mode::Plain => Ok(None),
+            Mode::Tls => {
+                #[cfg(not(target_family = "wasm"))]
+                let certificate_store = CertificateStore::WebPki;
+
+                #[cfg(target_family = "wasm")]
+                let certificate_store = CertificateStore::Native;
+
+                let tls_connector = build_tls_config(&certificate_store)?;
+
+                Ok(Some(tls_connector))
+            }
+        }
+    }
+}
+
+// impl Target {
+//     fn tls_connector() -> Option<TlsConnector> {
+//         todo!()
+//     }
+// }
+
+impl TryFrom<SafeUrl> for Target {
+    type Error = WsHandshakeError; // TODO: (@leonardo) add new error instead of jsonrpsee
+
+    fn try_from(url: SafeUrl) -> Result<Self, Self::Error> {
+        let _mode = match url.scheme() {
+            "ws" => Mode::Plain,
+            "wss" => Mode::Tls,
+            invalid_scheme => {
+                let err = format!("`{invalid_scheme}` not supported, expects 'ws' or 'wss'");
+                // let err = format!("`{invalid_scheme}` not supported, expects 'ws' ('wss'
+                // requires the tls feature)");
+                return Err(WsHandshakeError::Url(err.into()));
+            }
+        };
+
+        let host = url
+            .host_str()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| WsHandshakeError::Url("Invalid host".into()))?;
+
+        let mut path_and_query = url.path().to_owned();
+        if let Some(query) = url.query() {
+            path_and_query.push('?');
+            path_and_query.push_str(query);
+        }
+
+        let sockaddrs = url
+            .socket_addrs(|| None)
+            .map_err(WsHandshakeError::ResolutionFailed)?;
+
+        Ok(Self {
+            sockaddrs,
+            host,
+            _host_header: url.authority().to_string(),
+            mode: _mode,
+            _path_and_query: path_and_query.to_string(),
+        })
+    }
 }
 
 impl TryFrom<url::Url> for Target {
@@ -1596,9 +1689,9 @@ impl TryFrom<url::Url> for Target {
         Ok(Self {
             sockaddrs,
             host,
-            host_header: url.authority().to_string(),
-            _mode,
-            path_and_query: path_and_query.to_string(),
+            _host_header: url.authority().to_string(),
+            mode: _mode,
+            _path_and_query: path_and_query.to_string(),
         })
     }
 }
@@ -1649,8 +1742,14 @@ fn build_tls_config(
     Ok(std::sync::Arc::new(config).into())
 }
 
+enum Connector {
+    Tcp,
+    Arti,
+    I2P,
+}
+
 impl WsFederationApi<WsClient> {
-    /// Creates a new API client
+    /// Creates a new [`WsFederationApi`] client.
     pub fn new(peers: Vec<(PeerId, SafeUrl)>) -> Self {
         Self::new_with_client(peers, None)
     }
@@ -1667,22 +1766,22 @@ impl WsFederationApi<WsClient> {
         )
     }
 
+    /// Creates a new [`WsFederationApi`] client from an [`InviteCode`], assumes
+    /// they are in [`PeerId`] order.
+    pub fn from_invite_code(code: &[InviteCode]) -> Self {
+        Self::new(
+            code.iter()
+                .enumerate()
+                .map(|(id, invite_code)| (PeerId::from(id as u16), invite_code.url()))
+                .collect(),
+        )
+    }
+
     pub fn with_self_peer_id(self, self_peer_id: PeerId) -> Self {
         Self {
             self_peer_id: Some(self_peer_id),
             ..self
         }
-    }
-
-    /// Creates a new API client from a invite code, assumes they are in peer
-    /// id order
-    pub fn from_invite_code(info: &[InviteCode]) -> Self {
-        Self::new(
-            info.iter()
-                .enumerate()
-                .map(|(id, connect)| (PeerId::from(id as u16), connect.url()))
-                .collect(),
-        )
     }
 }
 
@@ -1694,25 +1793,31 @@ where
         self.peers.iter().map(|peer| peer.peer_id).collect()
     }
 
-    /// Creates a new API client
+    /// Creates a new [`WsFederationApi`] client.
     pub fn new_with_client(peers: Vec<(PeerId, SafeUrl)>, self_peer_id: Option<PeerId>) -> Self {
         WsFederationApi {
-            peer_ids: peers.iter().map(|m| m.0).collect(),
+            peer_ids: peers.iter().map(|(peer_id, _peer_url)| *peer_id).collect(),
             self_peer_id,
             peers: Arc::new(
                 peers
                     .into_iter()
-                    .map(|(peer_id, url)| {
+                    .map(|(peer_id, peer_url)| {
                         assert!(
-                            url.port_or_known_default().is_some(),
+                            peer_url.port_or_known_default().is_some(),
                             "API client requires a port"
                         );
-                        assert!(url.host().is_some(), "API client requires a target host");
+                        assert!(
+                            peer_url.host().is_some(),
+                            "API client requires a target host"
+                        );
 
                         FederationPeer {
                             peer_id,
-                            client: RwLock::new(FederationPeerClient::new(peer_id, url.clone())),
-                            url,
+                            client: RwLock::new(FederationPeerClient::new(
+                                peer_id,
+                                peer_url.clone(),
+                            )),
+                            url: peer_url,
                         }
                     })
                     .collect(),
@@ -1859,9 +1964,9 @@ mod tests {
         }
 
         // TODO: (@leonardo) fix the implementation for anonymized connections
-        async fn connect_anonymized(_url: &SafeUrl) -> Result<Self> {
-            Ok(Self(C::connect().await?))
-        }
+        // async fn connect_anonymized(_url: &SafeUrl) -> Result<Self> {
+        //     Ok(Self(C::connect().await?))
+        // }
     }
 
     #[apply(async_trait_maybe_send!)]
