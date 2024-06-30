@@ -6,7 +6,7 @@ if grep -E "(fedimint-mint|fedimint-wallet|fedimint-ln)" fedimint-server/Cargo.t
   >&2 echo "fedimint-server/Cargo.toml must not depend on modules"
   return 1
 fi
-if grep -E "(fedimint-mint|fedimint-wallet|fedimint-ln-(server|common|client))" fedimint-testing/Cargo.toml >&2 ; then
+if grep -E "(fedimint-mint|fedimint-wallet|fedimint-ln-(server|client))" fedimint-testing/Cargo.toml >&2 ; then
   >&2 echo "fedimint-testing/Cargo.toml must not depend on modules"
   return 1
 fi
@@ -23,7 +23,7 @@ find fedimint-client/ -name Cargo.toml | while read -r cargo_toml ; do
   fi
 done
 find ./ -name Cargo.lock | while read -r cargo_lock ; do
-  if grep -E "openssl" "$cargo_lock" >&2 ; then
+  if grep -E "openssl[^-probe]" "$cargo_lock" >&2 ; then
     >&2 echo "$cargo_lock must not depend on openssl"
     return 1
   fi

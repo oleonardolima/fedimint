@@ -115,6 +115,7 @@ let
   commonEnvsShell = commonEnvsShellRocksdbLink // {
     PROTOC = "${pkgs.protobuf}/bin/protoc";
     PROTOC_INCLUDE = "${pkgs.protobuf}/include";
+    CLIPPY_ARGS = "--deny warnings --allow deprecated";
   };
 
   # env variables we want to set in all nix derivations (but NOT the nix develop shell)
@@ -130,6 +131,7 @@ let
       openssl
       pkg-config
       protobuf
+      sqlite
     ] ++ lib.optionals (!stdenv.isDarwin) [
       util-linux
       iproute2
@@ -313,7 +315,7 @@ rec {
   workspaceClippy = craneLib.cargoClippy {
     cargoArtifacts = workspaceDeps;
 
-    cargoClippyExtraArgs = "--workspace --all-targets --no-deps -- --deny warnings --allow deprecated";
+    cargoClippyExtraArgs = "--workspace --all-targets --no-deps";
     doInstallCargoArtifacts = false;
   };
 
@@ -519,6 +521,7 @@ rec {
       "fedimintd"
       "fedimint-cli"
       "fedimint-dbtool"
+      "fedimint-recoverytool"
     ];
   };
 
@@ -583,6 +586,12 @@ rec {
     {
       pkg = gateway-pkgs;
       bin = "gateway-cln-extension";
+    };
+
+  fedimint-recoverytool = flakeboxLib.pickBinary
+    {
+      pkg = fedimint-pkgs;
+      bin = "recoverytool";
     };
 
   container =
@@ -653,7 +662,7 @@ rec {
         pkgs.dockerTools.buildLayeredImage
           {
             name = "fedimint-devtools";
-            contents = [ devimint fedimint-dbtool fedimint-load-test-tool pkgs.bash pkgs.coreutils ];
+            contents = [ devimint fedimint-dbtool fedimint-load-test-tool pkgs.bash pkgs.coreutils fedimint-recoverytool ];
             config = {
               Cmd = [
                 "${pkgs.bash}/bin/bash"

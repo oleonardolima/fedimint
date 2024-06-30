@@ -11,14 +11,14 @@ use fedimint_core::db::{DatabaseTransaction, IRawDatabaseExt};
 use fedimint_core::envs::BitcoinRpcConfig;
 use fedimint_core::task::sleep_in_test;
 use fedimint_core::util::{BoxStream, NextOrPending};
-use fedimint_core::{sats, time, Amount, Feerate, PeerId, ServerModule};
+use fedimint_core::{sats, Amount, Feerate, PeerId, ServerModule};
 use fedimint_dummy_client::DummyClientInit;
 use fedimint_dummy_common::config::DummyGenParams;
 use fedimint_dummy_server::DummyInit;
 use fedimint_testing::btc::BitcoinTest;
 use fedimint_testing::fixtures::Fixtures;
 use fedimint_wallet_client::api::WalletFederationApi;
-use fedimint_wallet_client::{DepositState, WalletClientInit, WalletClientModule, WithdrawState};
+use fedimint_wallet_client::{WalletClientInit, WalletClientModule, WithdrawState};
 use fedimint_wallet_common::config::{WalletConfig, WalletGenParams};
 use fedimint_wallet_common::tweakable::Tweakable;
 use fedimint_wallet_common::txoproof::PegInProof;
@@ -40,20 +40,17 @@ fn bsats(satoshi: u64) -> bitcoin::Amount {
 
 const PEG_IN_AMOUNT_SATS: u64 = 5000;
 const PEG_OUT_AMOUNT_SATS: u64 = 1000;
-const PEG_IN_TIMEOUT: Duration = Duration::from_secs(60);
 
-async fn peg_in<'a>(
+async fn initial_peg_in<'a>(
     client: &'a ClientHandleArc,
     bitcoin: &dyn BitcoinTest,
     finality_delay: u64,
 ) -> anyhow::Result<BoxStream<'a, Amount>> {
-    let valid_until = time::now() + PEG_IN_TIMEOUT;
-
     let mut balance_sub = client.subscribe_balance_changes().await;
     assert_eq!(balance_sub.ok().await?, sats(0));
 
     let wallet_module = &client.get_first_module::<WalletClientModule>();
-    let (op, address) = wallet_module.get_deposit_address(valid_until, ()).await?;
+    let (op, address, _) = wallet_module.allocate_deposit_address().await?;
     info!(?address, "Peg-in address generated");
     let (_proof, tx) = bitcoin
         .send_and_mine_block(
@@ -66,15 +63,9 @@ async fn peg_in<'a>(
         .get_tx_block_height(&tx.txid())
         .await
         .context("expected tx to be mined")?;
-    info!(?height, ?tx, "Peg-in transaction mined");
-    let sub = wallet_module.subscribe_deposit_updates(op).await?;
-    let mut sub = sub.into_stream();
-    assert_eq!(sub.ok().await?, DepositState::WaitingForTransaction);
-    assert_matches!(sub.ok().await?, DepositState::WaitingForConfirmation { .. });
-
+    info!(?height, ?tx, txid = ?tx.txid(), "Peg-in transaction mined");
     bitcoin.mine_blocks(finality_delay).await;
-    assert!(matches!(sub.ok().await?, DepositState::Confirmed(_)));
-    assert!(matches!(sub.ok().await?, DepositState::Claimed(_)));
+    wallet_module.await_deposit(op).await?;
     assert_eq!(client.get_balance().await, sats(PEG_IN_AMOUNT_SATS));
     assert_eq!(balance_sub.ok().await?, sats(PEG_IN_AMOUNT_SATS));
     info!(?height, ?tx, "Peg-in transaction claimed");
@@ -158,7 +149,7 @@ async fn on_chain_peg_in_and_peg_out_happy_case() -> anyhow::Result<()> {
     bitcoin.mine_blocks(finality_delay).await;
     await_consensus_to_catch_up(&client, 1).await?;
 
-    let mut balance_sub = peg_in(&client, bitcoin.as_ref(), finality_delay).await?;
+    let mut balance_sub = initial_peg_in(&client, bitcoin.as_ref(), finality_delay).await?;
 
     info!("Peg-in finished for test on_chain_peg_in_and_peg_out_happy_case");
     // Peg-out test, requires block to recognize change UTXOs
@@ -206,6 +197,77 @@ async fn on_chain_peg_in_and_peg_out_happy_case() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn on_chain_peg_in_detects_multiple() -> anyhow::Result<()> {
+    let fixtures = fixtures();
+    let fed = fixtures.new_default_fed().await;
+    let client = fed.new_client().await;
+    let bitcoin = fixtures.bitcoin();
+    let bitcoin = bitcoin.lock_exclusive().await;
+    info!("Starting test on_chain_peg_in_and_peg_out_happy_case");
+
+    let finality_delay = 10;
+    bitcoin.mine_blocks(finality_delay).await;
+    await_consensus_to_catch_up(&client, 1).await?;
+
+    let starting_balance = client.get_balance().await;
+    info!(?starting_balance, "Starting balance");
+
+    let wallet_module = &client.get_first_module::<WalletClientModule>();
+    let (op, address, tweak_idx) = wallet_module.allocate_deposit_address().await?;
+
+    // First peg-in
+    {
+        info!("Funding first peg-in transaction mined");
+        let (_proof, tx) = bitcoin
+            .send_and_mine_block(
+                &address,
+                bsats(PEG_IN_AMOUNT_SATS)
+                    + bsats(wallet_module.get_fee_consensus().peg_in_abs.msats / 1000),
+            )
+            .await;
+        let height = bitcoin
+            .get_tx_block_height(&tx.txid())
+            .await
+            .context("expected tx to be mined")?;
+        info!(?height, ?tx, txid = ?tx.txid(), "First peg-in transaction mined");
+        bitcoin.mine_blocks(finality_delay).await;
+        wallet_module.await_deposit(op).await?;
+        assert_eq!(
+            client.get_balance().await,
+            sats(PEG_IN_AMOUNT_SATS) + starting_balance
+        );
+        info!(?height, ?tx, "First peg-in transaction claimed");
+    }
+
+    // Second peg-in
+    {
+        info!("Funding second peg-in transaction mined");
+        let (_proof, tx) = bitcoin
+            .send_and_mine_block(
+                &address,
+                bsats(PEG_IN_AMOUNT_SATS)
+                    + bsats(wallet_module.get_fee_consensus().peg_in_abs.msats / 1000),
+            )
+            .await;
+
+        let height = bitcoin
+            .get_tx_block_height(&tx.txid())
+            .await
+            .context("expected tx to be mined")?;
+        info!(?height, ?tx, txid = ?tx.txid(), "Second peg-in transaction mined");
+        bitcoin.mine_blocks(finality_delay).await;
+        wallet_module.await_num_deposits(tweak_idx, 2).await?;
+        assert_eq!(
+            client.get_balance().await,
+            sats(PEG_IN_AMOUNT_SATS * 2) + starting_balance
+        );
+        info!(?height, ?tx, "Second peg-in transaction claimed");
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn peg_out_fail_refund() -> anyhow::Result<()> {
     let fixtures = fixtures();
     let fed = fixtures.new_default_fed().await;
@@ -218,7 +280,7 @@ async fn peg_out_fail_refund() -> anyhow::Result<()> {
     bitcoin.mine_blocks(finality_delay).await;
     await_consensus_to_catch_up(&client, 1).await?;
 
-    let mut balance_sub = peg_in(&client, bitcoin.as_ref(), finality_delay).await?;
+    let mut balance_sub = initial_peg_in(&client, bitcoin.as_ref(), finality_delay).await?;
 
     info!("Peg-in finished for test peg_out_fail_refund");
     // Peg-out test, requires block to recognize change UTXOs
@@ -253,22 +315,22 @@ async fn peg_out_fail_refund() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn peg_outs_support_rbf() -> anyhow::Result<()> {
+async fn rbf_withdrawals_are_rejected() -> anyhow::Result<()> {
     let fixtures = fixtures();
     let fed = fixtures.new_default_fed().await;
     let client = fed.new_client().await;
     let bitcoin = fixtures.bitcoin();
     // Need lock to keep tx in mempool from getting mined
     let bitcoin = bitcoin.lock_exclusive().await;
-    info!("Starting test peg_outs_support_rbf");
+    info!("Starting test rbf_withdrawals_are_rejected");
 
     let finality_delay = 10;
     bitcoin.mine_blocks(finality_delay).await;
     await_consensus_to_catch_up(&client, 1).await?;
 
-    let mut balance_sub = peg_in(&client, bitcoin.as_ref(), finality_delay).await?;
+    let mut balance_sub = initial_peg_in(&client, bitcoin.as_ref(), finality_delay).await?;
 
-    info!("Peg-in finished for test peg_outs_support_rbf");
+    info!("Peg-in finished for test rbf_withdrawals_are_rejected");
     let address = checked_address_to_unchecked_address(&bitcoin.get_new_address().await);
     let peg_out = bsats(PEG_OUT_AMOUNT_SATS);
     let wallet_module = client.get_first_module::<WalletClientModule>();
@@ -300,36 +362,34 @@ async fn peg_outs_support_rbf() -> anyhow::Result<()> {
         fees: PegOutFees::new(1000, fees.total_weight),
         txid,
     };
+
     let wallet_module = client.get_first_module::<WalletClientModule>();
-    let op = wallet_module.rbf_withdraw(rbf.clone(), ()).await?;
-    let sub = wallet_module.subscribe_withdraw_updates(op).await?;
-    let mut sub = sub.into_stream();
-    assert_eq!(sub.ok().await?, WithdrawState::Created);
-    let txid = match sub.ok().await? {
-        WithdrawState::Succeeded(txid) => txid,
+    #[allow(deprecated)]
+    let rbf_op = wallet_module.rbf_withdraw(rbf.clone(), ()).await?;
+    let rbf_sub = wallet_module.subscribe_withdraw_updates(rbf_op).await?;
+    let mut rbf_sub = rbf_sub.into_stream();
+
+    assert_eq!(rbf_sub.ok().await?, WithdrawState::Created);
+    match rbf_sub.ok().await? {
+        WithdrawState::Failed(err) => {
+            assert!(err.contains("The wallet output version is not supported by this federation"))
+        }
         other => panic!("Unexpected state: {other:?}"),
-    };
-    let total_fees = fees.amount() + rbf.fees.amount();
-    assert_eq!(bitcoin.get_mempool_tx_fee(&txid).await, total_fees.into());
+    }
+
     assert_eq!(
         bitcoin
             .mine_block_and_get_received(&address.clone().assume_checked())
             .await,
         sats(PEG_OUT_AMOUNT_SATS)
     );
-    let balance_after_rbf_peg_out =
-        sats(PEG_IN_AMOUNT_SATS - PEG_OUT_AMOUNT_SATS - total_fees.to_sat());
+
     let current_balance = client.get_balance().await;
-    assert_eq!(balance_sub.ok().await?, current_balance);
-    // So we don't know which transaction will get mined first, it could be
-    // any one of the two, so we accept both
-    if current_balance != balance_after_rbf_peg_out
-        && current_balance != balance_after_normal_peg_out
-    {
-        bail!(
-            "Balance is {current_balance}, expected {balance_after_rbf_peg_out} or {balance_after_normal_peg_out}"
-        )
-    }
+    assert_eq!(
+        current_balance, balance_after_normal_peg_out,
+        "Balance is {current_balance}, expected {balance_after_normal_peg_out}"
+    );
+
     Ok(())
 }
 
@@ -349,7 +409,7 @@ async fn peg_outs_must_wait_for_available_utxos() -> anyhow::Result<()> {
     bitcoin.mine_blocks(finality_delay).await;
     await_consensus_to_catch_up(&client, 1).await?;
 
-    let mut balance_sub = peg_in(&client, bitcoin.as_ref(), finality_delay).await?;
+    let mut balance_sub = initial_peg_in(&client, bitcoin.as_ref(), finality_delay).await?;
 
     info!("Peg-in finished for test peg_outs_must_wait_for_available_utxos");
     let address = checked_address_to_unchecked_address(&bitcoin.get_new_address().await);
@@ -609,7 +669,7 @@ mod fedimint_migration_tests {
         snapshot_db_migrations, snapshot_db_migrations_client, validate_migrations_client,
         validate_migrations_server, BYTE_20, BYTE_32, BYTE_33,
     };
-    use fedimint_wallet_client::client_db::NextPegInTweakIndexKey;
+    use fedimint_wallet_client::client_db::{self, NextPegInTweakIndexKey, TweakIdx};
     use fedimint_wallet_client::{WalletClientInit, WalletClientModule};
     use fedimint_wallet_common::{
         PegOutFees, Rbf, SpendableUTXO, WalletCommonInit, WalletOutputOutcome,
@@ -798,7 +858,8 @@ mod fedimint_migration_tests {
         dbtx.insert_new_entry(&DatabaseVersionKeyV0, &DatabaseVersion(0))
             .await;
 
-        dbtx.insert_new_entry(&NextPegInTweakIndexKey, &2).await;
+        dbtx.insert_new_entry(&NextPegInTweakIndexKey, &TweakIdx(2))
+            .await;
 
         dbtx.commit_tx().await;
     }
@@ -964,9 +1025,9 @@ mod fedimint_migration_tests {
             "wallet-client",
             |db, _, _| async move {
                 let mut dbtx = db.begin_transaction_nc().await;
-                for prefix in fedimint_wallet_client::client_db::DbKeyPrefix::iter() {
+                for prefix in client_db::DbKeyPrefix::iter() {
                     match prefix {
-                        fedimint_wallet_client::client_db::DbKeyPrefix::NextPegInTweakIndex => {
+                        client_db::DbKeyPrefix::NextPegInTweakIndex => {
                             let next_peg_in_tweak = dbtx.get_value(&NextPegInTweakIndexKey).await;
                             ensure!(
                                 next_peg_in_tweak.is_some(),
@@ -974,6 +1035,8 @@ mod fedimint_migration_tests {
                             );
                             info!("Validated next peg in tweak index");
                         }
+                        client_db::DbKeyPrefix::PegInTweakIndex => {}
+                        client_db::DbKeyPrefix::ClaimedPegIn => {}
                     }
                 }
 
