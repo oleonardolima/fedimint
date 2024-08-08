@@ -5,13 +5,11 @@
 #![allow(clippy::default_trait_access)]
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_fields_in_debug)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::return_self_not_must_use)]
 #![allow(clippy::similar_names)]
-#![allow(clippy::struct_field_names)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::wildcard_imports)]
 
@@ -54,6 +52,7 @@ use db::{
     GatewayConfiguration, GatewayConfigurationKey, GatewayDbtxNcExt, GATEWAYD_DATABASE_VERSION,
 };
 use federation_manager::FederationManager;
+use fedimint_api_client::api::net::Connector;
 use fedimint_api_client::api::FederationError;
 use fedimint_client::module::init::ClientModuleInitRegistry;
 use fedimint_client::ClientHandleArc;
@@ -896,6 +895,19 @@ impl Gateway {
         let invite_code = InviteCode::from_str(&payload.invite_code).map_err(|e| {
             GatewayError::InvalidMetadata(format!("Invalid federation member string {e:?}"))
         })?;
+
+        // TODO: (@leonardo) Should we use default, or respond with an error ?
+        let connector = match &payload.use_tor {
+            Some(use_tor) => match use_tor {
+                true => Connector::tor(),
+                false => Connector::default(),
+            },
+            None => {
+                info!("Missing `use_tor` payload field, defaulting to `Connector::Tcp` variant!");
+                Connector::default()
+            }
+        };
+
         let federation_id = invite_code.federation_id();
 
         let _join_federation = self.client_joining_lock.lock().await;
@@ -926,6 +938,7 @@ impl Gateway {
             mint_channel_id,
             timelock_delta: 10,
             fees: gateway_config.routing_fees,
+            connector,
         };
 
         let client = self
@@ -1439,14 +1452,14 @@ impl Gateway {
     pub async fn routing_info_v2(&self, federation_id: &FederationId) -> Option<RoutingInfo> {
         Some(RoutingInfo {
             public_key: self.public_key_v2(federation_id).await?,
-            send_fee_default: PaymentFee::TEN_PROMILLE_PLUS_50_SATS,
+            send_fee_default: PaymentFee::SEND_FEE_LIMIT_DEFAULT,
             // The base fee ensures that the gateway does not loose sats sending the payment due to
             // fees paid on the transaction claiming the outgoing contract or subsequent
             // transactions spending the newly issued ecash
-            send_fee_minimum: PaymentFee::FIVE_PROMILLE_PLUS_50_SATS,
+            send_fee_minimum: PaymentFee::SEND_FEE_MINIMUM,
             // The base fee ensures that the gateway does not loose sats receiving the payment due
             // to fees paid on the transaction funding the incoming contract
-            receive_fee: PaymentFee::FIVE_PROMILLE_PLUS_50_SATS,
+            receive_fee: PaymentFee::RECEIVE_FEE_LIMIT_DEFAULT,
             expiration_delta_default: 500,
             expiration_delta_minimum: EXPIRATION_DELTA_MINIMUM_V2,
         })

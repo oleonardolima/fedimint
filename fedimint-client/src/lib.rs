@@ -1,6 +1,5 @@
 #![deny(clippy::pedantic)]
 #![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::default_trait_access)]
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::explicit_deref_methods)]
 #![allow(clippy::missing_errors_doc)]
@@ -88,15 +87,16 @@ use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, bail, ensure, Context};
 use async_stream::stream;
 use backup::ClientBackup;
 use db::{
     apply_migrations_client, apply_migrations_core_client, get_core_client_database_migrations,
     ApiSecretKey, CachedApiVersionSet, CachedApiVersionSetKey, ClientConfigKey, ClientInitStateKey,
-    ClientModuleRecovery, EncodedClientSecretKey, InitMode, PeerLastApiVersionsSummary,
-    PeerLastApiVersionsSummaryKey, CORE_CLIENT_DATABASE_VERSION,
+    ClientModuleRecovery, ClientPreRootSecretHashKey, EncodedClientSecretKey, InitMode,
+    PeerLastApiVersionsSummary, PeerLastApiVersionsSummaryKey, CORE_CLIENT_DATABASE_VERSION,
 };
+use fedimint_api_client::api::net::Connector;
 use fedimint_api_client::api::{
     ApiVersionSet, DynGlobalApi, DynModuleApi, FederationApiExt, IGlobalFederationApi,
 };
@@ -112,7 +112,7 @@ use fedimint_core::db::{
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::endpoint_constants::{CLIENT_CONFIG_ENDPOINT, VERSION_ENDPOINT};
 use fedimint_core::invite_code::InviteCode;
-use fedimint_core::module::registry::ModuleDecoderRegistry;
+use fedimint_core::module::registry::{ModuleDecoderRegistry, ModuleRegistry};
 use fedimint_core::module::{
     ApiAuth, ApiRequestErased, ApiVersion, MultiApiVersion, SupportedApiVersionsSummary,
     SupportedCoreApiVersions, SupportedModuleApiVersions,
@@ -770,6 +770,7 @@ pub struct Client {
     operation_log: OperationLog,
     secp_ctx: Secp256k1<secp256k1_zkp::All>,
     meta_service: Arc<MetaService>,
+    connector: Connector,
 
     task_group: TaskGroup,
 
@@ -855,7 +856,7 @@ impl Client {
 
         Ok(match client_secret {
             Some(client_secret) => Some(
-                T::consensus_decode(&mut client_secret.as_slice(), &Default::default())
+                T::consensus_decode(&mut client_secret.as_slice(), &ModuleRegistry::default())
                     .map_err(|e| anyhow!("Decoding failed: {e}"))?,
             ),
             None => None,
@@ -1963,6 +1964,7 @@ pub struct ClientBuilder {
     admin_creds: Option<AdminCreds>,
     db_no_decoders: Database,
     meta_service: Arc<MetaService>,
+    connector: Connector,
     stopped: bool,
 }
 
@@ -1970,8 +1972,9 @@ impl ClientBuilder {
     fn new(db: Database) -> Self {
         let meta_service = MetaService::new(LegacyMetaSource::default());
         ClientBuilder {
-            module_inits: Default::default(),
-            primary_module_instance: Default::default(),
+            module_inits: ModuleInitRegistry::new(),
+            primary_module_instance: None,
+            connector: Connector::default(),
             admin_creds: None,
             db_no_decoders: db,
             stopped: false,
@@ -1984,10 +1987,11 @@ impl ClientBuilder {
             module_inits: client.module_inits.clone(),
             primary_module_instance: Some(client.primary_module_instance),
             admin_creds: None,
-            db_no_decoders: client.db.with_decoders(Default::default()),
+            db_no_decoders: client.db.with_decoders(ModuleRegistry::default()),
             stopped: false,
             // non unique
             meta_service: client.meta_service.clone(),
+            connector: client.connector,
         }
     }
 
@@ -2067,9 +2071,17 @@ impl ClientBuilder {
         self.admin_creds = Some(creds);
     }
 
+    pub fn with_connector(&mut self, connector: Connector) {
+        self.connector = connector;
+    }
+
+    pub fn with_tor_connector(&mut self) {
+        self.with_connector(Connector::tor());
+    }
+
     async fn init(
         self,
-        root_secret: DerivableSecret,
+        pre_root_secret: DerivableSecret,
         config: ClientConfig,
         api_secret: Option<String>,
         init_mode: InitMode,
@@ -2085,6 +2097,11 @@ impl ClientBuilder {
             let mut dbtx = self.db_no_decoders.begin_transaction().await;
             // Save config to DB
             dbtx.insert_new_entry(&ClientConfigKey, &config).await;
+            dbtx.insert_entry(
+                &ClientPreRootSecretHashKey,
+                &pre_root_secret.derive_pre_root_secret_hash(),
+            )
+            .await;
 
             if let Some(api_secret) = api_secret.as_ref() {
                 dbtx.insert_new_entry(&ApiSecretKey, api_secret).await;
@@ -2104,7 +2121,8 @@ impl ClientBuilder {
         }
 
         let stopped = self.stopped;
-        self.build(root_secret, config, api_secret, stopped).await
+        self.build(pre_root_secret, config, api_secret, stopped)
+            .await
     }
 
     /// Join a new Federation
@@ -2144,7 +2162,7 @@ impl ClientBuilder {
     /// // Get invite code from user
     /// let invite_code = InviteCode::from_str("fed11qgqpw9thwvaz7te3xgmjuvpwxqhrzw3jxumrvvf0qqqjpetvlg8glnpvzcufhffgzhv8m75f7y34ryk7suamh8x7zetly8h0v9v0rm")
     ///     .expect("Invalid invite code");
-    /// let config = fedimint_api_client::download_from_invite_code(&invite_code).await
+    /// let config = fedimint_api_client::api::net::Connector::default().download_from_invite_code(&invite_code).await
     ///     .expect("Error downloading config");
     ///
     /// // Tell the user the federation name, bitcoin network
@@ -2182,11 +2200,11 @@ impl ClientBuilder {
     /// ```
     pub async fn join(
         self,
-        root_secret: DerivableSecret,
+        pre_root_secret: DerivableSecret,
         config: ClientConfig,
         api_secret: Option<String>,
     ) -> anyhow::Result<ClientHandle> {
-        self.init(root_secret, config, api_secret, InitMode::Fresh)
+        self.init(pre_root_secret, config, api_secret, InitMode::Fresh)
             .await
     }
 
@@ -2197,6 +2215,7 @@ impl ClientBuilder {
         config: &ClientConfig,
         api_secret: Option<String>,
     ) -> anyhow::Result<Option<ClientBackup>> {
+        let connector = self.connector;
         let api = DynGlobalApi::from_endpoints(
             // TODO: change join logic to use FederationId v2
             config
@@ -2205,6 +2224,7 @@ impl ClientBuilder {
                 .iter()
                 .map(|(peer_id, peer_url)| (*peer_id, peer_url.url.clone())),
             &api_secret,
+            &connector,
         );
         Client::download_backup_from_federation_static(
             &api,
@@ -2245,15 +2265,40 @@ impl ClientBuilder {
         Ok(client)
     }
 
-    pub async fn open(self, root_secret: DerivableSecret) -> anyhow::Result<ClientHandle> {
+    pub async fn open(self, pre_root_secret: DerivableSecret) -> anyhow::Result<ClientHandle> {
         let Some(config) = Client::get_config_from_db(&self.db_no_decoders).await else {
             bail!("Client database not initialized")
         };
 
+        if let Some(secret_hash) = self
+            .db_no_decoders()
+            .begin_transaction_nc()
+            .await
+            .get_value(&ClientPreRootSecretHashKey)
+            .await
+        {
+            ensure!(
+                pre_root_secret.derive_pre_root_secret_hash() == secret_hash,
+                "Secret hash does not match. Incorrect secret"
+            );
+        } else {
+            debug!(target: LOG_CLIENT, "Backfilling secret hash");
+            // Note: no need for dbtx autocommit, we are the only writer ATM
+            let mut dbtx = self.db_no_decoders.begin_transaction().await;
+            dbtx.insert_entry(
+                &ClientPreRootSecretHashKey,
+                &pre_root_secret.derive_pre_root_secret_hash(),
+            )
+            .await;
+            dbtx.commit_tx().await;
+        }
+
         let api_secret = Client::get_api_secret_from_db(&self.db_no_decoders).await;
         let stopped = self.stopped;
 
-        let client = self.build_stopped(root_secret, &config, api_secret).await?;
+        let client = self
+            .build_stopped(pre_root_secret, &config, api_secret)
+            .await?;
         if !stopped {
             client.as_inner().start_executor().await;
         }
@@ -2263,12 +2308,14 @@ impl ClientBuilder {
     /// Build a [`Client`] and start the executor
     async fn build(
         self,
-        root_secret: DerivableSecret,
+        pre_root_secret: DerivableSecret,
         config: ClientConfig,
         api_secret: Option<String>,
         stopped: bool,
     ) -> anyhow::Result<ClientHandle> {
-        let client = self.build_stopped(root_secret, &config, api_secret).await?;
+        let client = self
+            .build_stopped(pre_root_secret, &config, api_secret)
+            .await?;
         if !stopped {
             client.as_inner().start_executor().await;
         }
@@ -2288,6 +2335,7 @@ impl ClientBuilder {
         let config = Self::config_decoded(config, &decoders)?;
         let fed_id = config.calculate_federation_id();
         let db = self.db_no_decoders.with_decoders(decoders.clone());
+        let connector = self.connector;
         let peer_urls = get_api_urls(&db, &config).await;
         let api = if let Some(admin_creds) = self.admin_creds.as_ref() {
             DynGlobalApi::new_admin(
@@ -2297,9 +2345,10 @@ impl ClientBuilder {
                     .find_map(|(peer, api_url)| (admin_creds.peer_id == peer).then_some(api_url))
                     .context("Admin creds should match a peer")?,
                 &api_secret,
+                &connector,
             )
         } else {
-            DynGlobalApi::from_endpoints(peer_urls, &api_secret)
+            DynGlobalApi::from_endpoints(peer_urls, &api_secret, &connector)
         };
         let task_group = TaskGroup::new();
 
@@ -2329,7 +2378,7 @@ impl ClientBuilder {
         .unwrap_or(ApiVersionSet {
             core: ApiVersion::new(0, 0),
             // This will cause all modules to skip initialization
-            modules: Default::default(),
+            modules: BTreeMap::new(),
         });
 
         debug!(?common_api_versions, "Completed api version negotiation");
@@ -2337,11 +2386,11 @@ impl ClientBuilder {
         let mut module_recoveries: BTreeMap<
             ModuleInstanceId,
             Pin<Box<maybe_add_send!(dyn Future<Output = anyhow::Result<()>>)>>,
-        > = Default::default();
+        > = BTreeMap::new();
         let mut module_recovery_progress_receivers: BTreeMap<
             ModuleInstanceId,
             watch::Receiver<RecoveryProgress>,
-        > = Default::default();
+        > = BTreeMap::new();
 
         let final_client = FinalClient::default();
 
@@ -2531,6 +2580,7 @@ impl ClientBuilder {
             operation_log: OperationLog::new(db),
             client_recovery_progress_receiver,
             meta_service: self.meta_service,
+            connector,
         });
         client_inner
             .task_group
@@ -2605,9 +2655,9 @@ impl ClientBuilder {
         config.clone().redecode_raw(decoders)
     }
 
-    /// Re-derive client's root_secret using the federation ID. This eliminates
-    /// the possibility of having the same client root_secret across
-    /// multiple federations.
+    /// Re-derive client's `root_secret` using the federation ID. This
+    /// eliminates the possibility of having the same client `root_secret`
+    /// across multiple federations.
     fn federation_root_secret(
         root_secret: &DerivableSecret,
         config: &ClientConfig,
@@ -2625,7 +2675,7 @@ pub async fn get_decoded_client_secret<T: Decodable>(db: &Database) -> anyhow::R
 
     match client_secret {
         Some(client_secret) => {
-            T::consensus_decode(&mut client_secret.as_slice(), &Default::default())
+            T::consensus_decode(&mut client_secret.as_slice(), &ModuleRegistry::default())
                 .map_err(|e| anyhow!("Decoding failed: {e}"))
         }
         None => bail!("Encoded client secret not present in DB"),

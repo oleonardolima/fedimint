@@ -167,13 +167,13 @@ impl OperationLog {
 ///      determine the structure of the meta data.
 ///   3. To find out the current state of the operation there is a two-step
 ///      process:
-///     * First, the [`OperationLogEntry::outcome`] function returns the outcome
-///       if the operation finished **and** the update subscription stream has
-///       been processed till its end at least once.
-///     * If that isn't the case, the [`OperationLogEntry::outcome`] method will
-///       return `None` and the appropriate update subscription function has to
-///       be called. See the respective client extension trait for these
-///       functions.
+///      * First, the [`OperationLogEntry::outcome`] function returns the
+///        outcome if the operation finished **and** the update subscription
+///        stream has been processed till its end at least once.
+///      * If that isn't the case, the [`OperationLogEntry::outcome`] method
+///        will return `None` and the appropriate update subscription function
+///        has to be called. See the respective client extension trait for these
+///        functions.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OperationLogEntry {
     operation_module_kind: String,
@@ -344,6 +344,7 @@ mod tests {
     use fedimint_core::core::OperationId;
     use fedimint_core::db::mem_impl::MemDatabase;
     use fedimint_core::db::{Database, IRawDatabaseExt};
+    use fedimint_core::module::registry::ModuleRegistry;
     use futures::stream::StreamExt;
     use serde::{Deserialize, Serialize};
 
@@ -388,7 +389,7 @@ mod tests {
     async fn test_operation_log_update() {
         let op_id = OperationId([0x32; 32]);
 
-        let db = Database::new(MemDatabase::new(), Default::default());
+        let db = Database::new(MemDatabase::new(), ModuleRegistry::default());
         let op_log = OperationLog::new(db.clone());
 
         let mut dbtx = db.begin_transaction().await;
@@ -462,7 +463,7 @@ mod tests {
             }
         }
 
-        let db = Database::new(MemDatabase::new(), Default::default());
+        let db = Database::new(MemDatabase::new(), ModuleRegistry::default());
         let op_log = OperationLog::new(db.clone());
 
         for operation_idx in 0u8..98 {

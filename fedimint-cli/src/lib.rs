@@ -27,8 +27,9 @@ use anyhow::{format_err, Context};
 use bip39::Mnemonic;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use db_locked::LockedBuilder;
-use envs::FM_API_SECRET_ENV;
+use envs::{FM_API_SECRET_ENV, FM_USE_TOR_ENV, SALT_FILE};
 use fedimint_aead::{encrypted_read, encrypted_write, get_encryption_key};
+use fedimint_api_client::api::net::Connector;
 use fedimint_api_client::api::{
     DynGlobalApi, FederationApiExt, FederationError, IRawFederationApi, WsFederationApi,
 };
@@ -51,7 +52,6 @@ use fedimint_ln_client::LightningClientInit;
 use fedimint_logging::{TracingSetup, LOG_CLIENT};
 use fedimint_meta_client::MetaClientInit;
 use fedimint_mint_client::{MintClientInit, MintClientModule, OOBNotes, SpendableNote};
-use fedimint_server::config::io::SALT_FILE;
 use fedimint_wallet_client::api::WalletFederationApi;
 use fedimint_wallet_client::{WalletClientInit, WalletClientModule};
 use futures::future::pending;
@@ -210,6 +210,10 @@ struct Opts {
     #[arg(long, env = FM_PASSWORD_ENV)]
     password: Option<String>,
 
+    /// Activate usage of Tor as the Connector when building the Client
+    #[arg(long, env = FM_USE_TOR_ENV)]
+    use_tor: bool,
+
     /// Activate more verbose logging, for full control use the RUST_LOG env
     /// variable
     #[arg(short = 'v', long)]
@@ -241,6 +245,8 @@ impl Opts {
         api_secret: &Option<String>,
     ) -> CliResult<DynGlobalApi> {
         let our_id = self.our_id.ok_or_cli_msg("Admin client needs our-id set")?;
+        let connector = self.connector();
+
         Ok(DynGlobalApi::new_admin(
             our_id,
             peer_urls
@@ -249,6 +255,7 @@ impl Opts {
                 .context("Our peer URL not found in config")
                 .map_err_cli()?,
             api_secret,
+            &connector,
         ))
     }
 
@@ -271,6 +278,14 @@ impl Opts {
                     .map_err_cli_msg("could not open database")?,
             )
             .into())
+    }
+
+    fn connector(&self) -> Connector {
+        if self.use_tor {
+            Connector::tor()
+        } else {
+            Connector::default()
+        }
     }
 }
 
@@ -308,7 +323,7 @@ enum Command {
         peer: PeerId,
     },
 
-    /// Join a federation using it's InviteCode
+    /// Join a federation using its InviteCode
     JoinFederation {
         invite_code: String,
     },
@@ -500,7 +515,7 @@ Examples:
         #[arg(long = "out-file")]
         out_file: PathBuf,
         /// Encryption salt file, otherwise defaults to the salt file from the
-        /// in_file directory
+        /// `in_file` directory
         #[arg(long = "salt-file")]
         salt_file: Option<PathBuf>,
         /// The password that encrypts the configs
@@ -516,7 +531,7 @@ Examples:
         #[arg(long = "out-file")]
         out_file: PathBuf,
         /// Encryption salt file, otherwise defaults to the salt file from the
-        /// out_file directory
+        /// `out_file` directory
         #[arg(long = "salt-file")]
         salt_file: Option<PathBuf>,
         /// The password that encrypts the configs
@@ -606,6 +621,10 @@ impl FedimintCli {
         client_builder.with_module_inits(self.module_inits.clone());
         client_builder.with_primary_module(1);
 
+        if cli.use_tor {
+            client_builder.with_tor_connector();
+        }
+
         Ok(client_builder)
     }
 
@@ -614,7 +633,9 @@ impl FedimintCli {
         cli: &Opts,
         invite_code: InviteCode,
     ) -> CliResult<ClientHandleArc> {
-        let client_config = fedimint_api_client::download_from_invite_code(&invite_code)
+        let client_config = cli
+            .connector()
+            .download_from_invite_code(&invite_code)
             .await
             .map_err_cli()?;
 
@@ -675,7 +696,9 @@ impl FedimintCli {
     ) -> CliResult<ClientHandleArc> {
         let builder = self.make_client_builder(cli).await?;
 
-        let client_config = fedimint_api_client::download_from_invite_code(&invite_code)
+        let client_config = cli
+            .connector()
+            .download_from_invite_code(&invite_code)
             .await
             .map_err_cli()?;
 
@@ -873,8 +896,12 @@ impl FedimintCli {
                 }
                 let client = self.client_open(&cli).await?;
 
-                let ws_api: Arc<_> =
-                    WsFederationApi::new(client.get_peer_urls().await, client.api_secret()).into();
+                let ws_api: Arc<_> = WsFederationApi::new(
+                    &cli.connector(),
+                    client.get_peer_urls().await,
+                    client.api_secret(),
+                )
+                .into();
                 let response: Value = match peer_id {
                     Some(peer_id) => ws_api
                         .request_raw(peer_id.into(), &method, &[params.to_json()])

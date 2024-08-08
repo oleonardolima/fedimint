@@ -9,13 +9,14 @@ use anyhow::{bail, format_err, Context};
 use clap::{Parser, Subcommand};
 use fedimint_core::admin_client::ConfigGenParamsRequest;
 use fedimint_core::config::{
-    ModuleInitParams, ServerModuleConfigGenParamsRegistry, ServerModuleInitRegistry,
+    EmptyGenParams, ModuleInitParams, ServerModuleConfigGenParamsRegistry, ServerModuleInitRegistry,
 };
 use fedimint_core::core::ModuleKind;
 use fedimint_core::db::Database;
 use fedimint_core::envs::{
     is_env_var_set, BitcoinRpcConfig, FM_ENABLE_MODULE_LNV2_ENV, FM_USE_UNKNOWN_MODULE_ENV,
 };
+use fedimint_core::module::registry::ModuleRegistry;
 use fedimint_core::module::{ServerApiVersionsSummary, ServerDbVersionsSummary, ServerModuleInit};
 use fedimint_core::task::TaskGroup;
 use fedimint_core::timing;
@@ -216,15 +217,15 @@ impl Fedimintd {
     /// # Arguments
     ///
     /// * `code_version_hash` - The git hash of the code that the `fedimintd`
-    /// binary is being built from. This is used mostly for information
-    /// purposes (`fedimintd version-hash`). See `fedimint-build` crate for
-    /// easy way to obtain it.
+    ///   binary is being built from. This is used mostly for information
+    ///   purposes (`fedimintd version-hash`). See `fedimint-build` crate for
+    ///   easy way to obtain it.
     ///
     /// * `code_version_vendor_suffix` - An optional suffix that will be
-    /// appended to the internal fedimint release version, to distinguish
-    /// binaries built by different vendors, usually with a different set of
-    /// modules. Currently DKG will enforce that the combined `code_version`
-    /// is the same between all peers.
+    ///   appended to the internal fedimint release version, to distinguish
+    ///   binaries built by different vendors, usually with a different set of
+    ///   modules. Currently DKG will enforce that the combined `code_version`
+    ///   is the same between all peers.
     pub fn new(
         code_version_hash: &str,
         code_version_vendor_suffix: Option<&str>,
@@ -320,7 +321,7 @@ impl Fedimintd {
             .with_module_instance(
                 MintInit::kind(),
                 MintGenParams {
-                    local: Default::default(),
+                    local: EmptyGenParams::default(),
                     consensus: MintGenParamsConsensus::new(
                         2,
                         fedimint_mint_server::common::config::FeeConsensus::default(),
@@ -340,7 +341,8 @@ impl Fedimintd {
                         // next commit anyway
                         finality_delay,
                         client_default_bitcoin_rpc: default_esplora_server(network),
-                        fee_consensus: Default::default(),
+                        fee_consensus:
+                            fedimint_wallet_server::common::config::FeeConsensus::default(),
                     },
                 },
             );
@@ -558,7 +560,7 @@ async fn run(
 
     let db = Database::new(
         fedimint_rocksdb::RocksDb::open(data_dir.join(DB_FILE))?,
-        Default::default(),
+        ModuleRegistry::default(),
     );
 
     fedimint_server::run(

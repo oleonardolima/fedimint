@@ -135,6 +135,8 @@ pub struct ServerConfigConsensus {
     pub meta: BTreeMap<String, String>,
 }
 
+// FIXME: (@leonardo) Should this have another field for the expected transport
+// ? (e.g. clearnet/tor/...)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfigLocal {
     /// Network addresses and names for all p2p connections
@@ -218,7 +220,7 @@ impl ServerConfig {
             api_auth: params.local.api_auth.clone(),
             tls_key: params.local.our_private_key.clone(),
             broadcast_secret_key,
-            modules: Default::default(),
+            modules: BTreeMap::new(),
         };
         let local = ServerConfigLocal {
             p2p_endpoints: params.p2p_urls(),
@@ -229,7 +231,7 @@ impl ServerConfig {
             } else {
                 DEFAULT_BROADCAST_ROUND_DELAY_MS
             },
-            modules: Default::default(),
+            modules: BTreeMap::new(),
         };
         let consensus = ServerConfigConsensus {
             code_version: code_version_str,
@@ -242,7 +244,7 @@ impl ServerConfig {
             },
             api_endpoints: params.api_urls(),
             tls_certs: params.tls_certs(),
-            modules: Default::default(),
+            modules: BTreeMap::new(),
             meta: params.consensus.meta,
         };
         let mut cfg = Self {
@@ -485,7 +487,7 @@ impl ServerConfig {
         dkg.add(KeyType::Epoch, peers.to_num_peers().threshold());
 
         let mut registered_modules = registry.kinds();
-        let mut module_cfgs: BTreeMap<ModuleInstanceId, ServerModuleConfig> = Default::default();
+        let mut module_cfgs: BTreeMap<ModuleInstanceId, ServerModuleConfig> = BTreeMap::new();
         let modules = params.consensus.modules.iter_modules();
         let modules_runner = modules.map(|(module_instance_id, kind, module_params)| {
             let dkg = PeerHandle::new(&connections, module_instance_id, *our_id, peers.clone());

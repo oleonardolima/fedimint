@@ -1,5 +1,3 @@
-#![allow(clippy::let_unit_value)]
-
 pub mod aleph_bft;
 pub mod api;
 pub mod db;
@@ -17,6 +15,7 @@ use std::time::Duration;
 use anyhow::bail;
 use async_channel::Sender;
 use db::{get_global_database_migrations, GLOBAL_DATABASE_VERSION};
+use fedimint_api_client::api::net::Connector;
 use fedimint_api_client::api::DynGlobalApi;
 use fedimint_core::config::ServerModuleInitRegistry;
 use fedimint_core::core::{ModuleInstanceId, ModuleKind};
@@ -29,7 +28,7 @@ use fedimint_core::task::TaskGroup;
 use fedimint_core::NumPeers;
 use fedimint_logging::{LOG_CONSENSUS, LOG_CORE};
 use jsonrpsee::server::ServerHandle;
-use tokio::sync::watch;
+use tokio::sync::{watch, RwLock};
 use tracing::info;
 use tracing::log::warn;
 
@@ -104,8 +103,8 @@ pub async fn run(
 
     let (submission_sender, submission_receiver) = async_channel::bounded(TRANSACTION_BUFFER);
     let (shutdown_sender, shutdown_receiver) = watch::channel(None);
-    let connection_status_channels = Default::default();
-    let last_ci_by_peer = Default::default();
+    let connection_status_channels = Arc::new(RwLock::new(BTreeMap::new()));
+    let last_ci_by_peer = Arc::new(RwLock::new(BTreeMap::new()));
 
     let consensus_api = ConsensusApi {
         cfg: cfg.clone(),
@@ -119,8 +118,8 @@ pub async fn run(
             &cfg.consensus.modules,
             &module_init_registry,
         ),
-        last_ci_by_peer: Arc::clone(&last_ci_by_peer),
-        connection_status_channels: Arc::clone(&connection_status_channels),
+        last_ci_by_peer: last_ci_by_peer.clone(),
+        connection_status_channels: connection_status_channels.clone(),
         force_api_secret: force_api_secrets.get_active(),
     };
 
@@ -156,9 +155,16 @@ pub async fn run(
     info!(target: LOG_CONSENSUS, "Starting Consensus Engine");
 
     let api_urls = get_api_urls(&db, &cfg.consensus).await;
+
+    // FIXME: (@leonardo) How should this be handled ?
+    // Using the `Connector::default()` for now!
     ConsensusEngine {
         db,
-        federation_api: DynGlobalApi::from_endpoints(api_urls, &force_api_secrets.get_active()),
+        federation_api: DynGlobalApi::from_endpoints(
+            api_urls,
+            &force_api_secrets.get_active(),
+            &Connector::default(),
+        ),
         self_id_str: cfg.local.identity.to_string(),
         peer_id_str: (0..cfg.consensus.api_endpoints.len())
             .map(|x| x.to_string())
